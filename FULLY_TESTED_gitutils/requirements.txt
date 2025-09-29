@@ -1,0 +1,15 @@
+# Core testing framework
+pytest
+pytest-cov
+
+# Git interaction library (required by gitutils.py)
+GitPython
+
+# Data manipulation (required by gitutils.py)
+pandas
+
+# Visualization (required by gitutils.py)
+matplotlib
+
+# Property-based testing
+hypothesis
