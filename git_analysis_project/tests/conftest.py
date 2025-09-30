@@ -85,20 +85,22 @@ def empty_repo(tmp_path) -> Repo:
 @pytest.fixture
 def simple_repo_cache(simple_repo) -> CommitDataCache:
     """Provides a pre-built CommitDataCache for the simple repository."""
-    return CommitDataCache(simple_repo)
+    # FIX: Specify the 'master' branch which exists in the test repo.
+    return CommitDataCache(simple_repo, branch="master")
 
 
 @pytest.fixture
 def complex_repo_cache(complex_repo) -> CommitDataCache:
     """Provides a pre-built CommitDataCache for the complex repository."""
-    return CommitDataCache(complex_repo)
+    # FIX: Specify the 'master' branch which exists in the test repo.
+    return CommitDataCache(complex_repo, branch="master")
 
 
-# FIX: Added the missing fixture for the refactor repository cache.
 @pytest.fixture
 def refactor_repo_cache(refactor_repo) -> CommitDataCache:
     """Provides a pre-built CommitDataCache for the refactor repository."""
-    return CommitDataCache(refactor_repo)
+    # FIX: Specify the 'master' branch which exists in the test repo.
+    return CommitDataCache(refactor_repo, branch="master")
 
 
 @pytest.fixture

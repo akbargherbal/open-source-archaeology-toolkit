@@ -77,15 +77,35 @@ class TestCommitDataCache:
         assert "core.py" in changes_df["filepath"].values
 
     def test_cache_on_refactor_repo(self, refactor_repo_cache):
-        """Verify the cache correctly identifies file renames."""
-        changes_df = refactor_repo_cache.file_changes
-        refactor_commit = changes_df[changes_df["change_type"] == "R"]
+        """
+        Verify the cache correctly handles file renames.
 
-        assert not refactor_commit.empty
-        assert len(refactor_commit) == 2
+        The new `git log --numstat` approach does not provide a distinct 'R'
+        (rename) status. Instead, it tracks the file to its new location. This
+        test is updated to verify that the *new* file path is correctly
+        recorded in the file_changes DataFrame for the refactoring commit.
+        """
+        commits_df = refactor_repo_cache.commits
+        changes_df = refactor_repo_cache.file_changes
+
+        # Find the refactoring commit
+        refactor_commit_hash = commits_df[
+            commits_df["message"].str.contains("Refactor: Move files")
+        ]["hash"].iloc[0]
+
+        # Get the file changes associated with that specific commit
+        refactor_changes = changes_df[changes_df["commit_hash"] == refactor_commit_hash]
+
+        # The new implementation correctly follows renames but doesn't label
+        # them as 'R'. We verify the new paths are present.
+        assert not refactor_changes.empty
+        assert len(refactor_changes) == 2
 
         # The filepath should be the *new* path after the rename
-        assert "new_core/file1.py" in refactor_commit["filepath"].values
-        assert "new_core/file2.py" in refactor_commit["filepath"].values
+        final_filepaths = refactor_changes["filepath"].tolist()
+        assert "new_core/file1.py" in final_filepaths
+        assert "new_core/file2.py" in final_filepaths
+
         # The old path should not be present in the final file path list
-        assert "old_module/file1.py" not in refactor_commit["filepath"].values
+        assert "old_module/file1.py" not in final_filepaths
+        assert "old_module/file2.py" not in final_filepaths

@@ -20,9 +20,10 @@ class TestPerformance:
         """Benchmark the churn calculation on the new cache-based system."""
 
         # The setup phase (creating the cache) is done once.
-        cache = CommitDataCache(simple_repo)
+        # FIX: Explicitly set the branch to 'master' to match the test repo.
+        cache = CommitDataCache(simple_repo, branch="master")
 
-        # FIX: Benchmark the new cache-based function
+        # Benchmark the new cache-based function
         result = benchmark(calculate_file_churn_cached, cache)
 
         # We can also assert correctness within the benchmark
