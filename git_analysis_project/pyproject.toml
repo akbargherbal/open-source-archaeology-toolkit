@@ -6,15 +6,19 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+markers = [
+    "performance: marks tests as performance benchmarks (slow to run)",
+]
 addopts = """
     --cov=gitutils
+    --cov=git_cache
     --cov-report=term-missing
     --cov-fail-under=35
     -v
 """
 
 [tool.coverage.run]
-source = ["gitutils"]
+source = ["gitutils", "git_cache"]
 omit = [
     "*/tests/*",
     "*/.venv/*",

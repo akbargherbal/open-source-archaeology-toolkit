@@ -1,6 +1,7 @@
 # Core testing framework
 pytest
 pytest-cov
+pytest-benchmark  # Added for performance testing
 
 # Git interaction library (required by gitutils.py)
 GitPython
