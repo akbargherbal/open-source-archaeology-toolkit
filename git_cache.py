@@ -7,6 +7,7 @@ reducing processing time from 45 minutes to ~3-5 minutes on Windows systems.
 
 Key improvements:
 - Single batched git log call for commits and file changes
+- Hybrid approach: --name-status for change types, --numstat for churn metrics
 - Optimized ls-tree with better error handling for file presence
 - Platform-agnostic (Windows + Linux compatible)
 - Produces identical output to original git_cache.py
@@ -34,7 +35,7 @@ class CommitDataCache:
         repo: Repo,
         max_commits: Optional[int] = None,
         progress_interval: int = 1000,
-        branch: str = "develop",
+        branch: str = "main",
     ):
         """
         Initializes and processes the repository.
@@ -69,24 +70,26 @@ class CommitDataCache:
 
     def _process_commits_batched(self, max_commits: Optional[int] = None):
         """
-        OPTIMIZED: Process all commits in a single git log call.
+        OPTIMIZED: Process all commits using hybrid approach.
 
-        This method replaces ~40,000 subprocess calls with 1, dramatically
-        reducing overhead on Windows systems.
+        Phase 1: Use --name-status for accurate change types (A/M/D/R)
+        Phase 2: Use --numstat for insertion/deletion counts
+
+        This gives us both accuracy and complete churn metrics.
 
         Performance: ~1-2 minutes for 20,000 commits (vs 45 minutes legacy)
         """
         commits_data = []
         file_changes_data = []
 
-        # Build git log command
+        # === PHASE 1: Get commits and accurate change types with --name-status ===
         format_str = "%H|%an|%ae|%ct|%s"
-        args = ["--numstat", f"--pretty=format:{format_str}", "-m", "-M", "-C"]
+        args = ["--name-status", f"--pretty=format:{format_str}", "-m", "-M", "-C"]
         if max_commits:
             args.append(f"--max-count={max_commits}")
         args.append(self.branch)
 
-        print("      Running batched git log command...")
+        print("      Phase 1: Running git log with --name-status...")
         start_time = datetime.now()
         try:
             output = self.repo.git.log(*args)
@@ -94,25 +97,19 @@ class CommitDataCache:
             raise RuntimeError(f"Batched git log failed: {e}")
 
         print(
-            f"      Git log completed in {(datetime.now() - start_time).total_seconds():.2f}s"
+            f"      Phase 1 completed in {(datetime.now() - start_time).total_seconds():.2f}s"
         )
         print("      Parsing output...")
 
-        # --- REFACTORED PARSING LOGIC ---
         current_commit_dict = None
         commit_count = 0
 
         lines = output.split("\n")
         for line in lines:
-            # A metadata line contains '|' but no '\t'
             is_metadata_line = "|" in line and "\t" not in line
 
             if is_metadata_line:
-                # A new metadata line signals the end of the previous commit's data.
-                # Save the completed commit object before starting a new one.
                 if current_commit_dict:
-                    # The -m flag can cause duplicate metadata lines for merges.
-                    # We only add a commit if its hash is new to our list.
                     if (
                         not commits_data
                         or commits_data[-1]["hash"] != current_commit_dict["hash"]
@@ -124,7 +121,6 @@ class CommitDataCache:
                                 f"      Parsed {commit_count:,} commits...", flush=True
                             )
 
-                # Now, parse the new metadata line to start the next commit.
                 parts = line.split("|")
                 if len(parts) >= 5:
                     current_commit_dict = {
@@ -135,47 +131,44 @@ class CommitDataCache:
                         "message": "|".join(parts[4:]),
                     }
                 else:
-                    # Handle potentially malformed lines, though unlikely
+                    # BUG FIX #3: Log warning for malformed lines
+                    print(
+                        f"      Warning: Malformed metadata line (skipping): {line[:100]}",
+                        file=sys.stderr,
+                    )
                     current_commit_dict = None
 
             elif "\t" in line and current_commit_dict:
-                # This is a file change line for the current commit.
+                # BUG FIX #1 & #2: Parse --name-status format
                 parts = line.split("\t")
-                if len(parts) >= 3:
-                    ins_str, dels_str, filepath = (
-                        parts[0],
-                        parts[1],
-                        "\t".join(parts[2:]),
-                    )
-                    insertions = int(ins_str) if ins_str != "-" else 0
-                    deletions = int(dels_str) if dels_str != "-" else 0
+                if len(parts) >= 2:
+                    change_type = parts[0][0]  # First char: A, M, D, R, C
 
-                    if "=>" in filepath:
-                        match = re.search(r"\{(.*?)\s*=>\s*(.*?)\}", filepath)
-                        filepath = (
-                            filepath.replace(match.group(0), match.group(2))
-                            if match
-                            else filepath.split("=>")[-1].strip()
+                    if change_type == "R" and len(parts) >= 3:
+                        # Rename: track the new filepath
+                        filepath = parts[2]
+                        file_changes_data.append(
+                            {
+                                "commit_hash": current_commit_dict["hash"],
+                                "filepath": filepath,
+                                "change_type": "R",
+                                "insertions": 0,
+                                "deletions": 0,
+                            }
+                        )
+                    elif change_type in ("A", "M", "D", "C"):
+                        filepath = parts[1]
+                        file_changes_data.append(
+                            {
+                                "commit_hash": current_commit_dict["hash"],
+                                "filepath": filepath,
+                                "change_type": change_type,
+                                "insertions": 0,
+                                "deletions": 0,
+                            }
                         )
 
-                    change_type = "M"
-                    if insertions > 0 and deletions == 0:
-                        change_type = "A"
-                    elif deletions > 0 and insertions == 0:
-                        change_type = "D"
-
-                    file_changes_data.append(
-                        {
-                            "commit_hash": current_commit_dict["hash"],
-                            "filepath": filepath,
-                            "change_type": change_type,
-                            "insertions": insertions,
-                            "deletions": deletions,
-                        }
-                    )
-
-        # After the loop, the very last commit is still in current_commit_dict.
-        # It needs to be saved.
+        # Save the last commit
         if current_commit_dict:
             if (
                 not commits_data
@@ -183,27 +176,85 @@ class CommitDataCache:
             ):
                 commits_data.append(current_commit_dict)
                 commit_count += 1
-        # --- END REFACTORED LOGIC ---
 
         print(f"      Parsed {commit_count:,} commits total")
 
-        if commits_data:
-            self._commits_df = pd.DataFrame(commits_data)
-            print(f"      Created commits DataFrame: {len(self._commits_df):,} rows")
-        else:
+        if not commits_data:
             print("      Warning: No commits data parsed")
             return
 
-        if file_changes_data:
-            self._file_changes_df = pd.DataFrame(file_changes_data)
-            self._file_changes_df["total_churn"] = (
-                self._file_changes_df["insertions"] + self._file_changes_df["deletions"]
-            )
-            print(
-                f"      Created file_changes DataFrame: {len(self._file_changes_df):,} rows"
-            )
-        else:
+        self._commits_df = pd.DataFrame(commits_data)
+        print(f"      Created commits DataFrame: {len(self._commits_df):,} rows")
+
+        if not file_changes_data:
             print("      Warning: No file changes data parsed")
+            return
+
+        # === PHASE 2: Get insertion/deletion counts with --numstat ===
+        print("      Phase 2: Running git log with --numstat for churn metrics...")
+        args_numstat = ["--numstat", f"--pretty=format:{format_str}", "-m", "-M", "-C"]
+        if max_commits:
+            args_numstat.append(f"--max-count={max_commits}")
+        args_numstat.append(self.branch)
+
+        start_time = datetime.now()
+        try:
+            output_numstat = self.repo.git.log(*args_numstat)
+        except GitCommandError as e:
+            print(f"      Warning: Could not get numstat data: {e}", file=sys.stderr)
+            output_numstat = ""
+
+        if output_numstat:
+            print(
+                f"      Phase 2 completed in {(datetime.now() - start_time).total_seconds():.2f}s"
+            )
+
+            # Parse numstat to extract insertion/deletion counts
+            numstat_dict = {}  # Key: (commit_hash, filepath), Value: (ins, dels)
+            current_hash = None
+
+            for line in output_numstat.split("\n"):
+                is_metadata = "|" in line and "\t" not in line
+
+                if is_metadata:
+                    parts = line.split("|")
+                    if len(parts) >= 1:
+                        current_hash = parts[0]
+                elif "\t" in line and current_hash:
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        ins_str, dels_str, filepath = (
+                            parts[0],
+                            parts[1],
+                            "\t".join(parts[2:]),
+                        )
+                        insertions = int(ins_str) if ins_str != "-" else 0
+                        deletions = int(dels_str) if dels_str != "-" else 0
+
+                        # Handle renames in numstat (they have => in path)
+                        if "=>" in filepath:
+                            match = re.search(r"\{(.*?)\s*=>\s*(.*?)\}", filepath)
+                            filepath = (
+                                filepath.replace(match.group(0), match.group(2))
+                                if match
+                                else filepath.split("=>")[-1].strip()
+                            )
+
+                        numstat_dict[(current_hash, filepath)] = (insertions, deletions)
+
+            # Merge numstat data into file_changes_data
+            for entry in file_changes_data:
+                key = (entry["commit_hash"], entry["filepath"])
+                if key in numstat_dict:
+                    entry["insertions"], entry["deletions"] = numstat_dict[key]
+
+        self._file_changes_df = pd.DataFrame(file_changes_data)
+        self._file_changes_df["total_churn"] = (
+            self._file_changes_df["insertions"] + self._file_changes_df["deletions"]
+        )
+        print(
+            f"      Created file_changes DataFrame: {len(self._file_changes_df):,} rows"
+        )
 
         print("      Building file presence data...")
         self._build_file_presence_optimized()
@@ -262,8 +313,6 @@ class CommitDataCache:
             )
         else:
             print("      Warning: No file presence data collected")
-
-    # --- _process_commits_legacy method has been completely removed ---
 
     @property
     def commits(self) -> pd.DataFrame:
