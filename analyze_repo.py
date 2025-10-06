@@ -2,6 +2,7 @@ import pandas as pd
 import os
 import sys
 import time
+import argparse
 from datetime import datetime
 from gitutils import (
     load_repository,
@@ -12,29 +13,67 @@ from gitutils import (
 )
 from git_cache import CommitDataCache
 
-# --- Configuration ---
 
-REPO_PATH = "../REPOS/recipes"
-repo_name = os.path.basename(REPO_PATH.rstrip("/"))
-
-# Create dedicated output directory
-OUTPUT_DIR = f"{repo_name}-repo-analysis"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# MODIFIED: All files now save to the dedicated output directory
-CACHE_BASE_NAME = f"{repo_name}-cache"
-CACHE_FILES = {
-    "commits": os.path.join(OUTPUT_DIR, f"{CACHE_BASE_NAME}-commits.parquet"),
-    "file_changes": os.path.join(OUTPUT_DIR, f"{CACHE_BASE_NAME}-file_changes.parquet"),
-    "file_presence": os.path.join(
-        OUTPUT_DIR, f"{CACHE_BASE_NAME}-file_presence.parquet"
-    ),
-}
-LOG_FILE = os.path.join(OUTPUT_DIR, f"{repo_name}-analysis.log")
-
-print(f"Output directory: {OUTPUT_DIR}/")
-print(f"Cache files will be stored as: {CACHE_BASE_NAME}-*.parquet")
-print(f"Log file will be stored as: {LOG_FILE}")
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Analyze Git repository commit history and file changes.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s /path/to/repo
+  %(prog)s ../REPOS/recipes --output-dir custom-output
+  %(prog)s /path/to/repo --volatile-threshold 150 --core-threshold 0.95
+  %(prog)s /path/to/repo --no-cache --branch develop
+        """,
+    )
+    
+    # Positional argument
+    parser.add_argument(
+        "repo_path",
+        help="Path to the Git repository to analyze"
+    )
+    
+    # Optional arguments
+    parser.add_argument(
+        "-o", "--output-dir",
+        help="Custom output directory (default: <repo_name>-repo-analysis)",
+        default=None
+    )
+    
+    parser.add_argument(
+        "-b", "--branch",
+        help="Specific branch to analyze (default: auto-detect main/master/develop)",
+        default=None
+    )
+    
+    parser.add_argument(
+        "--volatile-threshold",
+        type=int,
+        default=200,
+        help="Minimum commits for a file to be considered volatile (default: 200)"
+    )
+    
+    parser.add_argument(
+        "--core-threshold",
+        type=float,
+        default=0.98,
+        help="Minimum presence ratio for core files (default: 0.98 = 98%%)"
+    )
+    
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Force re-processing of repository, ignore existing cache"
+    )
+    
+    parser.add_argument(
+        "--cache-prefix",
+        help="Custom prefix for cache files (default: <repo_name>-cache)",
+        default=None
+    )
+    
+    return parser.parse_args()
 
 
 class Logger:
@@ -66,7 +105,47 @@ def log_print(message, logger=None, include_timestamp=False):
     print(message, flush=True)
 
 
-def run_analysis():
+def clean_dataframe_strings(df):
+    """Clean all string columns in a DataFrame to handle encoding issues."""
+    df = df.copy()
+    string_cols = df.select_dtypes(include=['object']).columns
+    for col in string_cols:
+        df[col] = df[col].apply(
+            lambda x: x.encode('utf-8', errors='replace').decode('utf-8') 
+            if isinstance(x, str) else x
+        )
+    return df
+
+
+def run_analysis(args):
+    """Run the repository analysis with provided arguments."""
+    
+    # --- Configuration from arguments ---
+    REPO_PATH = args.repo_path
+    repo_name = os.path.basename(REPO_PATH.rstrip("/"))
+    
+    # Create dedicated output directory
+    if args.output_dir:
+        OUTPUT_DIR = args.output_dir
+    else:
+        OUTPUT_DIR = f"{repo_name}-repo-analysis"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Cache file setup
+    CACHE_BASE_NAME = args.cache_prefix if args.cache_prefix else f"{repo_name}-cache"
+    CACHE_FILES = {
+        "commits": os.path.join(OUTPUT_DIR, f"{CACHE_BASE_NAME}-commits.parquet"),
+        "file_changes": os.path.join(OUTPUT_DIR, f"{CACHE_BASE_NAME}-file_changes.parquet"),
+        "file_presence": os.path.join(OUTPUT_DIR, f"{CACHE_BASE_NAME}-file_presence.parquet"),
+    }
+    LOG_FILE = os.path.join(OUTPUT_DIR, f"{repo_name}-analysis.log")
+    
+    print(f"Repository: {REPO_PATH}")
+    print(f"Output directory: {OUTPUT_DIR}/")
+    print(f"Cache files: {CACHE_BASE_NAME}-*.parquet")
+    print(f"Log file: {LOG_FILE}")
+    print()
+    
     logger = Logger(LOG_FILE)
     sys.stdout = logger
 
@@ -83,22 +162,26 @@ def run_analysis():
             repo = load_repository(REPO_PATH)
             log_print("✓ Repository loaded successfully.", include_timestamp=True)
 
-            # NEW: Dynamic Branch Selection Logic
-            BRANCH_PRIORITY = ["main", "master", "develop"]
-            existing_branches = [b.name for b in repo.branches]
-            target_branch = None
-            for branch_name in BRANCH_PRIORITY:
-                if branch_name in existing_branches:
-                    target_branch = branch_name
-                    break
-
-            if not target_branch:
-                target_branch = repo.active_branch.name
-                log_print(
-                    f"  No priority branch found. Using active branch: '{target_branch}'"
-                )
+            # Branch Selection Logic
+            if args.branch:
+                target_branch = args.branch
+                log_print(f"  Using specified branch: '{target_branch}'")
             else:
-                log_print(f"  Found priority branch to analyze: '{target_branch}'")
+                BRANCH_PRIORITY = ["main", "master", "develop"]
+                existing_branches = [b.name for b in repo.branches]
+                target_branch = None
+                for branch_name in BRANCH_PRIORITY:
+                    if branch_name in existing_branches:
+                        target_branch = branch_name
+                        break
+
+                if not target_branch:
+                    target_branch = repo.active_branch.name
+                    log_print(
+                        f"  No priority branch found. Using active branch: '{target_branch}'"
+                    )
+                else:
+                    log_print(f"  Found priority branch to analyze: '{target_branch}'")
 
         except Exception as e:
             log_print(f"✗ Error loading repository: {e}", include_timestamp=True)
@@ -106,10 +189,9 @@ def run_analysis():
 
         # --- Step 2: Create or Load the CommitDataCache ---
         cache = None
-        # MODIFIED: Check for the existence of all three Parquet files
         cache_exists = all(os.path.exists(f) for f in CACHE_FILES.values())
 
-        if cache_exists:
+        if cache_exists and not args.no_cache:
             log_print(
                 f"\n[2/4] Found existing cache files in: '{OUTPUT_DIR}/'",
                 include_timestamp=True,
@@ -117,7 +199,6 @@ def run_analysis():
             log_print("      Loading cache from disk...")
             start_time = time.time()
             try:
-                # MODIFIED: Load from three separate Parquet files
                 cache_data = {
                     "commits": pd.read_parquet(CACHE_FILES["commits"]),
                     "file_changes": pd.read_parquet(CACHE_FILES["file_changes"]),
@@ -140,10 +221,15 @@ def run_analysis():
                 )
                 log_print("      Will re-process repository.")
                 cache = None
+        elif args.no_cache:
+            log_print(
+                f"\n[2/4] --no-cache flag set, ignoring existing cache.",
+                include_timestamp=True,
+            )
 
         if cache is None:
             log_print(
-                f"\n[2/4] No valid cache found. Processing repository commits...",
+                f"\n[2/4] Processing repository commits...",
                 include_timestamp=True,
             )
             log_print("      This may take several minutes for large repositories...")
@@ -151,7 +237,6 @@ def run_analysis():
             log_print("")
 
             start_time = time.time()
-            # MODIFIED: Pass the dynamically selected branch to the cache builder
             cache = CommitDataCache(repo, branch=target_branch)
             elapsed = time.time() - start_time
 
@@ -162,10 +247,14 @@ def run_analysis():
             log_print(f"      Saving cache to Parquet files in '{OUTPUT_DIR}/'...")
 
             try:
-                # MODIFIED: Save each DataFrame to its own Parquet file
-                cache.commits.to_parquet(CACHE_FILES["commits"])
-                cache.file_changes.to_parquet(CACHE_FILES["file_changes"])
-                cache.file_presence.to_parquet(CACHE_FILES["file_presence"])
+                # Clean DataFrames before saving to handle encoding issues
+                commits_clean = clean_dataframe_strings(cache.commits)
+                file_changes_clean = clean_dataframe_strings(cache.file_changes)
+                file_presence_clean = clean_dataframe_strings(cache.file_presence)
+                
+                commits_clean.to_parquet(CACHE_FILES["commits"])
+                file_changes_clean.to_parquet(CACHE_FILES["file_changes"])
+                file_presence_clean.to_parquet(CACHE_FILES["file_presence"])
                 log_print("✓ Cache saved successfully.", include_timestamp=True)
             except Exception as e:
                 log_print(f"✗ Error saving Parquet cache: {e}", include_timestamp=True)
@@ -196,13 +285,12 @@ def run_analysis():
         log_print(churn_df.head().to_string(index=False))
 
         # Analysis 2: Volatile Files
-        volatile_threshold = 200
         log_print(
-            f"\n▸ Analysis 2: Volatile Files (changed >= {volatile_threshold} times)",
+            f"\n▸ Analysis 2: Volatile Files (changed >= {args.volatile_threshold} times)",
             include_timestamp=True,
         )
         start_time = time.time()
-        volatile_df = find_volatile_files_cached(cache, min_commits=volatile_threshold)
+        volatile_df = find_volatile_files_cached(cache, min_commits=args.volatile_threshold)
         elapsed = time.time() - start_time
         log_print(f"  Completed in {elapsed:.4f} seconds")
         log_print("\n  Top 5 most frequently modified files:")
@@ -233,11 +321,11 @@ def run_analysis():
 
         try:
             log_print(
-                "\n▸ Analysis 4: Core Files (present in >98% of commits)",
+                f"\n▸ Analysis 4: Core Files (present in >{args.core_threshold*100:.0f}% of commits)",
                 include_timestamp=True,
             )
             start_time = time.time()
-            core_files_df = find_core_files_cached(cache, threshold=0.98)
+            core_files_df = find_core_files_cached(cache, threshold=args.core_threshold)
             elapsed = time.time() - start_time
             log_print(f"  Completed in {elapsed:.4f} seconds")
             log_print("\n  Top 5 core files:")
@@ -259,4 +347,5 @@ def run_analysis():
 
 
 if __name__ == "__main__":
-    run_analysis()
+    args = parse_args()
+    run_analysis(args)

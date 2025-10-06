@@ -538,11 +538,6 @@ def filter_by_file_extension(files: List[str], extensions: List[str]) -> List[st
     return [f for f in files if Path(f).suffix in extensions]
 
 
-# gitutils.py
-
-# ... (all other code remains the same) ...
-
-
 def group_by_directory(files: List[str], depth: int = 1) -> Dict[str, List[str]]:
     """Groups a list of file paths by their parent directory at a specified depth."""
     groups = defaultdict(list)
